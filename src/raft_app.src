@@ -1,0 +1,11 @@
+{application,raft,
+[{description, "RAFT consensus protocol"}
+ {vsn, "1.0"},
+ {registered, [node, super]},
+ {applications, [
+                 kernel,
+                 stdlib
+                ]},
+ {mod, {raft_app,[]}}
+ {env, []}
+]}.

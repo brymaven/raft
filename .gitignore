@@ -1,3 +1,4 @@
 *.beam
 raft.boot
 raft.script
+.rebar

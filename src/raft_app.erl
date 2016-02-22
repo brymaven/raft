@@ -1,6 +1,11 @@
 -module(raft_app).
--export([start/2, stop/1]).
+
 -behaviour(application).
+
+%% ===================================================================
+%% Application callbacks
+%% ===================================================================
+-export([start/2, stop/1]).
 
 start(_StartType, _Args) ->
     {ok, Addresses} = application:get_env(addresses),
