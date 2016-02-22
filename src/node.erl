@@ -5,21 +5,10 @@
 
 -behaviour(gen_fsm).
 -include("raft_interface.hrl").
--import(rand, [uniform/1]).
 -export([start_election/1, vote/1]).
 -export([follower_next_state/2]).
 
-%% Have an in memory log
-%% Client passes command
-  %% 1. Command put in log in machine
-  %% 2. Once replicated in log, can be passed to the state machine for execution.
-  %% 3. Once state machine executed, can return command to client
-
-%% When modifying log, must persist to disk before returning.
-%% When entry is stored in a majority of servers, we say it is commited.
-
 start_link(Node, Addresses) ->
-    io:format("Starting new process from node module ~p~n", [Node]),
     EmptyLog = array:new({fixed, false}),
 
     %% TODO(bryant): Log must be persisted on disk.
@@ -28,8 +17,9 @@ start_link(Node, Addresses) ->
     gen_fsm:start_link({local, ?MODULE}, ?MODULE, State, []).
 
 %% Random value between [T, 2T].
+%% This allows progress eventually be made during leader elections.
 timeout_value(T) ->
-    T + rand:uniform(T).
+    T + random:uniform(T).
 
 init(#state{timeout=Timeout} = State) ->
     {ok, follower, State, Timeout}.
@@ -44,7 +34,6 @@ vote(#state{term=Term, node_id=Node, log=Log, addresses=Addresses}) ->
     Vote = #request_vote{term=Term, candidate_id=Node,
                          last_log_index=LastLogIndex,
                          last_log_term=LastLogTerm},
-    io:format("~p~n", [Vote]),
     broadcast(Node, Addresses, {vote, Node, Vote}).
 
 %% Invoked by leader to replicate log entries
@@ -62,48 +51,42 @@ heartbeat(State) ->
     gen_fsm:start_timer(5000, heartbeat),
     append_entries(State).
 
+log_unknown(Msg, StateName) ->
+    io:format("Encountered unexpected event while running as ~p: ~p~n",
+              [StateName, Msg]).
+
 follower({vote, From, #request_vote{term=Term, candidate_id=CandidateId}},
          #state{node_id = Node, term=CurrentTerm, voted_for=VotedFor} = State) ->
+    VoteAtTerm = array:get(Term, VotedFor),
     if
         (Term < CurrentTerm) ->
-            %%gen_fsm:send_event(From, {vote_response, false, CurrentTerm}),
             {next_state, follower, State};
-        (VotedFor == undefined) ->
-            io:format("Node: ~p sending a response of ~p~n", [Node, {vote_response, true, CurrentTerm}]),
+        (VoteAtTerm == undefined) ->
+            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
             gen_fsm:send_event({node, From}, {vote_response, true, CurrentTerm}),
-            {next_state, follower, State#state{voted_for=CandidateId}};
+            {next_state, follower, State#state{voted_for=array:set(Term, CandidateId, VotedFor)}};
         true ->
             gen_fsm:send_event({node, From}, {vote_response, false, CurrentTerm}),
             {next_state, follower, State}
     end;
 
-%% During timeout, will start an election to see if it should become a leader.
-%% Increment Current Term
-%% Change to Candidate State
-%% Vote for self
-%% Send RequestVote RPC too all other servers
+%% During timeout, start an election.
 follower(timeout, #state{} = State) ->
     start_election(State);
 
-%% Most servers will be in follower state at a time
-%% Can go to Candidate once there is a timeout
-%% Initial state for servers
-
 %% followers are completely passive.
-%% For it to believe it's a follower, it must receive something from the server
-%% Only way it would know is if it gets a heartbeat.
 follower(Msg, #state{term = Term, node_id = Node, timeout=Timeout} = State) ->
     case Msg of
         candidate ->
             io:format("~p~n", ["Follower -> Candidate"]),
-            {next_state, candidate, State, Timeout()};
+            {next_state, candidate, State, Timeout};
         #append_entry{leader_id = From} = AppendEntry ->
             {Successful, NewState} = follower_next_state(State, AppendEntry),
             gen_fsm:send_event({node, From}, {Successful, Term}),
-            {next_state, follower, NewState, Timeout()};
+            {next_state, follower, NewState, Timeout};
         _Msg ->
             io:format("Unknown Message: ~p~n", [Msg]),
-            {next_state, follower, State, Timeout()}
+            {next_state, follower, State, Timeout}
     end.
 
 %% Returns {success, NewState}
@@ -155,6 +138,7 @@ candidate(Msg, #state{node_id = Node, votes = Votes, log = Log,
                     %% This timer must be a << election_timeout.
                     LastLogIndex = array:size(Log) - 1,
                     NextState = State#state{
+                                  leader_id = Node,
                                   indexes = leader_index:new(Addresses, LastLogIndex)},
                     heartbeat(State),
                     {next_state, leader, NextState};
@@ -177,13 +161,11 @@ candidate(Msg, #state{node_id = Node, votes = Votes, log = Log,
     end.
 
 %% Each server will vote only once. Need to persist to disk (TODO)
-
-%% Raft has different timeouts. Each server has a different timeout, so they would start becoming a candidate at different times. [T, 2T]
-%% see timeout_value/1
 start_election(#state{term = CurrentTerm, node_id = Node, timeout = Timeout} = State) ->
     io:format("Node ~p just timed out. Starting election~n", [Node]),
     vote(State),
-    {next_state, candidate, State#state{term = CurrentTerm + 1, voted_for = Node}, timeout = Timeout}.
+    {next_state, candidate,
+     State#state{term = CurrentTerm + 1, votes = 1, voted_for = Node}, Timeout}.
 
 terminate(_Reason, _LoopData) ->
     ok.
@@ -199,8 +181,16 @@ handle_event(status, StateName, #state{node_id = Node, timeout = Timeout} = Stat
     io:format("node: ~p is running as ~p~n", [Node, StateName]),
     {next_state, StateName, StateData, Timeout}.
 
-handle_sync_event(_Event, _From, StateName, StateData) ->
-    {next_state, StateName, StateData}.
+%% Points to current leader
+handle_sync_event(leader, From, StateName, StateData) ->
+    _Reply = gen_fsm:reply(From, StateData#state.leader_id),
+    {next_state, StateName, StateData};
+
+%% Handles client call
+handle_sync_event(Event, From, StateName, #state{machine = Machine} = StateData) ->
+    {Result, NewMachine} = machine:apply(Event, Machine),
+    _Reply = gen_fsm:reply(From, Result),
+    {next_state, StateName, StateData#state{machine = NewMachine}}.
 
 terminate(normal, _State, _Data) ->
     ok.

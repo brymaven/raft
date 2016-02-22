@@ -1,1 +1,21 @@
-erl -pa ebin -config conf/raft.config -sname $1 -boot raft
+#!/usr/bin/env ruby
+
+require 'thor'
+
+class Cli < Thor
+  desc 'add NODE', 'Starts a new node'
+  def add(node)
+    run_erl_cmd("-name #{node} -boot raft")
+  end
+
+  desc 'client', 'connects a raft client'
+  def client()
+    run_erl_cmd()
+  end
+
+  def run_erl_cmd(flags='')
+    system "erl -pa ebin -config conf/raft.config #{flags}"
+  end
+end
+
+Cli.start(ARGV)

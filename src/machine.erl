@@ -2,19 +2,22 @@
 %%% State Machine for Raft (Currently just abstraction over dict)
 %%%---------------------------------------------------------------------
 -module(machine).
--export([new/0, apply/3, apply/4]).
+-export([new/0, apply/2]).
 
 -spec(new() -> dict:dict()).
 new() ->
     dict:new().
 
--spec(apply(atom(), term(), dict:dict()) -> dict:dict()).
-apply(delete, Key, Dict) ->
-    dict:erase(Key, Dict);
-
-apply(get, Key, Dict) ->
-    dict:find(Key, Dict).
-
--spec(apply(atom(), term(), term(), dict:dict()) -> dict:dict()).
-apply(put, Key, Value, Dict) ->
-    dict:store(Key, Value, Dict).
+-spec(apply(term(), dict:dict()) -> {ok | term() | empty, dict:dict()}).
+apply(Msg, Dict) ->
+    case Msg of
+        {get, Key} ->
+            Value = dict:find(Key, Dict),
+            {Value, Dict};
+        {delete, Key} ->
+            {ok, dict:erase(Key, Dict)};
+        {put, Key, Value} ->
+            {ok, dict:store(Key, Value, Dict)};
+        _ ->
+            {undefined_op, Dict}
+    end.
