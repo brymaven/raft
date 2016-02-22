@@ -24,10 +24,6 @@ timeout_value(T) ->
 init(#state{timeout=Timeout} = State) ->
     {ok, follower, State, Timeout}.
 
-%% Candidate include log info in RequestVote RPCs (index & term) of last log entry
-%% Voting server V denies vote if its log is "more complete"
-%% last_term_v > last_term_c or lastterm_v == last_term_c and lastindex_v > lastindex_c
-%% Winner will have most complete among cluster.
 vote(#state{term=Term, node_id=Node, log=Log, addresses=Addresses}) ->
     LastLogIndex = array:size(Log)-1,
     LastLogTerm  = (array:get(LastLogIndex, Log))#entry.term,
