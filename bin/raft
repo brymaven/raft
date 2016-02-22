@@ -1,0 +1,1 @@
+erl -pa ebin -config conf/raft.config -sname $1 -boot raft

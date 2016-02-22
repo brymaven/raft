@@ -1,0 +1,5 @@
+{release, {"Raft Concensus", "R1"}, {erts, "6.2"},
+ [{kernel, "3.0.3"},
+  {stdlib, "2.2"},
+  {sasl, "2.4.1"},
+  {raft, "1.0"}]}.
