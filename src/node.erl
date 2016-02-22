@@ -1,7 +1,7 @@
 -module(node).
 -export([init/1, start_link/2, handle_info/3, handle_event/3, handle_sync_event/4, terminate/2, stop/0]).
 -export([code_change/4, terminate/3]).
--export([follower/2, leader/2, candidate/2]).
+-export([follower/2, follower/3, leader/2, leader/3, candidate/2, candidate/3]).
 
 -behaviour(gen_fsm).
 -include("raft_interface.hrl").
@@ -12,8 +12,8 @@ start_link(Node, Addresses) ->
     EmptyLog = array:new({fixed, false}),
 
     %% TODO(bryant): Log must be persisted on disk.
-    State = #state{log=array:set(0, #entry{term = 0, command = initialize}, EmptyLog),
-                   node_id=Node, addresses = Addresses, timeout = timeout_value(10000)},
+    State = #state{log=array:set(0, #entry{term=0, command=initialize}, EmptyLog),
+                   node_id=Node, addresses=Addresses, timeout=timeout_value(10000)},
     gen_fsm:start_link({local, ?MODULE}, ?MODULE, State, []).
 
 %% Random value between [T, 2T].
@@ -75,7 +75,7 @@ follower(timeout, #state{} = State) ->
     start_election(State);
 
 %% followers are completely passive.
-follower(Msg, #state{term = Term, node_id = Node, timeout=Timeout} = State) ->
+follower(Msg, #state{term=Term, timeout=Timeout} = State) ->
     case Msg of
         candidate ->
             io:format("~p~n", ["Follower -> Candidate"]),
@@ -85,14 +85,14 @@ follower(Msg, #state{term = Term, node_id = Node, timeout=Timeout} = State) ->
             gen_fsm:send_event({node, From}, {Successful, Term}),
             {next_state, follower, NewState, Timeout};
         _Msg ->
-            io:format("Unknown Message: ~p~n", [Msg]),
+            log_unknown(Msg, follower),
             {next_state, follower, State, Timeout}
     end.
 
 %% Returns {success, NewState}
 %% success will be true if follower contained entry matching prev_log_index, prev_log_term
-%% TODO(bryant): Need to delete all entries after the last successful one. I'm not sure how to really delete entries from arrays. An idea is to keep track of a valid index
-follower_next_state(#state{log = Log} = State,
+%% TODO(bryant): Need to delete all entries after the last successful one.
+follower_next_state(#state{log=Log} = State,
                     #append_entry{leader_id=LeaderId, command=Command,
                                   prev_term=PrevTerm, prev_index=PrevIndex,
                                   cur_term=CurTerm, cur_index=CurIndex}) ->
@@ -107,30 +107,28 @@ follower_next_state(#state{log = Log} = State,
     end.
 
 %% Timeout exhausted during leader state
-leader({timeout, _Ref, _Msg}, #state{node_id = Node} = State) ->
+leader({timeout, _Ref, _Msg}, #state{node_id=Node} = State) ->
     io:format("Node: ~p broadcasting another heartbeat~n", [Node]),
     heartbeat(State),
     {next_state, leader, State};
 
 leader(Msg, State) ->
-    io:format("Message: ~p to leader is probably some timeout~n", [Msg]),
     case Msg of
-        follower ->
-            io:format("~p~n", ["Leader -> Follower"]),
-            {next_state, follower, State};
+        {_Success, _Term} ->
+            {next_state, leader, State};
         _Msg ->
-            io:format("Unknown message on leader: ~p~n", [Msg]),
+            log_unknown(Msg, leader),
             {next_state, leader, State}
     end.
 
 %% Timeout, so it assumes that there's been a split vote
-candidate(timeout, #state{} = State) ->
+candidate(timeout, State) ->
     start_election(State);
 
-candidate(Msg, #state{node_id = Node, votes = Votes, log = Log,
-                      addresses = Addresses, timeout = Timeout} = State) ->
+candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
+                      addresses=Addresses, timeout=Timeout} = State) ->
     case Msg of
-        {vote_response, true, Term} ->
+        {vote_response, true, _Term} ->
             io:format("~p Accepted Vote from server~n", [Node]),
             if
                 Votes > 1 ->
@@ -147,25 +145,39 @@ candidate(Msg, #state{node_id = Node, votes = Votes, log = Log,
                      State#state{votes = Votes + 1},
                      Timeout}
             end;
-        {vote_response, false, Term} ->
-            io:format("Rejected Vote~n"),
-            io:format("Do something if term ~p is larger than my term~n", [Term]),
+        {vote_response, false, _Term} ->
+            io:format("Vote was rejected~n"),
             {next_state, candidate, State, Timeout};
-        follower ->
-            io:format("Received AppendEntry from a valid leader.~n"),
-            io:format("Stepping Down.~n"),
+        #append_entry{} ->
+            io:format("Received AppendEntry from a valid leader.~n Stepping down.~n"),
             {next_state, follower, State, Timeout};
         _Msg ->
-            io:format("Unkown Message. Log it ~p~n", [Msg]),
+            log_unknown(Msg, candidate),
             {next_state, candidate, State, Timeout}
     end.
 
 %% Each server will vote only once. Need to persist to disk (TODO)
-start_election(#state{term = CurrentTerm, node_id = Node, timeout = Timeout} = State) ->
+start_election(#state{term=CurrentTerm, node_id=Node, timeout=Timeout} = State) ->
     io:format("Node ~p just timed out. Starting election~n", [Node]),
     vote(State),
     {next_state, candidate,
-     State#state{term = CurrentTerm + 1, votes = 1, voted_for = Node}, Timeout}.
+     State#state{term=CurrentTerm + 1, votes=1, voted_for=Node}, Timeout}.
+
+%% Handles client call
+leader(Event, From, #state{machine=Machine} = StateData) ->
+    {Result, NewMachine} = machine:apply(Event, Machine),
+    _Reply = gen_fsm:reply(From, Result),
+    {next_state, leader, StateData#state{machine = NewMachine}}.
+
+%% Only leader handles sync events
+%% followers and candidates just ignore message
+follower(Event, _From, State) ->
+    log_unknown(Event, follower),
+    {next_state, follower, State}.
+
+candidate(Event, _From, State) ->
+    log_unknown(Event, candidate),
+    {next_state, candidate, State}.
 
 terminate(_Reason, _LoopData) ->
     ok.
@@ -177,20 +189,14 @@ handle_info(_I, StateName, State) ->
     {next_state, StateName, State}.
 
 %% Useful debugging step for now. Checks the state of a node.
-handle_event(status, StateName, #state{node_id = Node, timeout = Timeout} = StateData) ->
+handle_event(status, StateName, #state{node_id=Node, timeout=Timeout} = StateData) ->
     io:format("node: ~p is running as ~p~n", [Node, StateName]),
     {next_state, StateName, StateData, Timeout}.
 
 %% Points to current leader
 handle_sync_event(leader, From, StateName, StateData) ->
     _Reply = gen_fsm:reply(From, StateData#state.leader_id),
-    {next_state, StateName, StateData};
-
-%% Handles client call
-handle_sync_event(Event, From, StateName, #state{machine = Machine} = StateData) ->
-    {Result, NewMachine} = machine:apply(Event, Machine),
-    _Reply = gen_fsm:reply(From, Result),
-    {next_state, StateName, StateData#state{machine = NewMachine}}.
+    {next_state, StateName, StateData}.
 
 terminate(normal, _State, _Data) ->
     ok.
