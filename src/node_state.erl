@@ -5,24 +5,26 @@
 -module(node_state).
 
 -include("raft_interface.hrl").
--export([new/2, follower_next_state/2, leader_next_state/2]).
+-export([new/2, follower_next_state/2, leader_next_state/2, next_state/2]).
 
 new(Node, Addresses) ->
     EmptyLog = array:new({fixed, false}),
 
     %% TODO(bryant): Log must be persisted on disk.
     #state{log=array:set(0, #entry{term=0, command=initialize}, EmptyLog),
-           node_id=Node, addresses=Addresses, timeout=timeout_value(5000)}.
+           node_id=Node, commit_index=0, addresses=Addresses,
+           timeout=timeout_value(5000)}.
 
 %% Random value between [T, 2T].
 %% This allows progress eventually be made during leader elections.
 timeout_value(T) ->
     T + random:uniform(T).
 
-follower_next_state(#state{log=Log} = State,
-                    #append_entry{leader_id=LeaderId, command=Command,
+follower_next_state(#state{log=Log, commit_index=CommitIndex} = State,
+                    #append_entry{leader_id=LeaderId, leader_commit=LeaderCommit,
                                   prev_term=PrevTerm, prev_index=PrevIndex,
-                                  cur_term=CurTerm, cur_index=CurIndex}) ->
+                                  cur_term=CurTerm, cur_index=CurIndex,
+                                  command=Command}) ->
     case (array:size(Log) > PrevIndex) andalso
         ((array:get(PrevIndex, Log))#entry.term == PrevTerm) of
         true ->
@@ -32,8 +34,14 @@ follower_next_state(#state{log=Log} = State,
                                              array:reset(Idx, Arr)
                                      end, Log,
                                      lists:seq(CurIndex, array:size(Log) - 1)),
+            NewCommitIndex = if
+                                 LeaderCommit > CommitIndex ->
+                                     min(LeaderCommit, CurIndex);
+                                 true ->
+                                     CommitIndex
+                             end,
             {true, State#state{log=array:set(CurIndex, NewEntry, ClearedLog),
-                               leader_id = LeaderId}};
+                               leader_id=LeaderId, commit_index=NewCommitIndex}};
         false -> {false, State}
     end.
 
@@ -41,3 +49,33 @@ follower_next_state(#state{log=Log} = State,
 leader_next_state(#state{indexes=LeaderIndex} = State,
                   #append_response{success=Success, node_id=NodeId}) ->
     State#state{indexes=leader_index:update(NodeId, Success, LeaderIndex)}.
+
+-spec(next_state(#request_vote{}, #state{}) -> {boolean(), #state{}}).
+next_state(#request_vote{
+              term=Term, candidate_id=CandidateId,
+              last_log_index=CandidateLogIndex, last_log_term=CandidateLogTerm},
+           #state{node_id=Node, log=Log, term=CurrentTerm, voted_for=VotedFor} = State) ->
+    VoteAtTerm = array:get(Term, VotedFor),
+    {LastLogIndex, #entry{term=LastLogTerm}} = last_valid(Log),
+    io:format("Log term comparison: ~p, Log index comparison ~p~n", [CandidateLogTerm > LastLogTerm, CandidateLogIndex >= LastLogIndex]),
+    if
+        Term < CurrentTerm ->
+            {false, State};
+        VoteAtTerm == undefined, CandidateLogTerm > LastLogTerm; (CandidateLogTerm == LastLogTerm) and (CandidateLogIndex >= LastLogIndex) ->
+            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
+            {true, State#state{
+                     voted_for=array:set(Term, CandidateId, VotedFor),
+                     leader_id=undefined}};
+        true ->
+            {false, State}
+    end.
+
+%% TODO(bryant): Use a different data type for log than Array and remove this
+last_valid(Array) ->
+    array:sparse_foldl(fun (I, Element, Acc) ->
+                              case Element of
+                                  undefined ->
+                                      Acc;
+                                  _ -> {I, Element}
+                              end
+                      end, undefined, Array).

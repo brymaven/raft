@@ -12,15 +12,8 @@ start_link(Node, Addresses) ->
     gen_fsm:start_link({local, ?MODULE}, ?MODULE, node_state:new(Node, Addresses), []).
 
 init(#state{timeout=Timeout} = State) ->
-    {ok, follower, State, Timeout}.
-
-vote(#state{term=Term, node_id=Node, log=Log, addresses=Addresses}) ->
-    LastLogIndex = array:size(Log)-1,
-    LastLogTerm  = (array:get(LastLogIndex, Log))#entry.term,
-    Vote = #request_vote{term=Term, candidate_id=Node,
-                         last_log_index=LastLogIndex,
-                         last_log_term=LastLogTerm},
-    broadcast(Node, Addresses, {vote, Node, Vote}).
+    Ref = gen_fsm:start_timer(Timeout, dusty),
+    {ok, follower, State#state{timer_ref=Ref}}.
 
 %% Invoked by leader to replicate log entries
 append_entries(#state{term=Term, node_id=Node, addresses=Addresses}) ->
@@ -34,36 +27,24 @@ append_entries(#state{term=Term, node_id=Node, addresses=Addresses}) ->
 
 %% Heartbeat is just an append_entry without any data.
 heartbeat(State) ->
-    gen_fsm:start_timer(5000, heartbeat),
+    gen_fsm:start_timer(1000, heartbeat),
     append_entries(State).
 
 log_unknown(Msg, StateName) ->
     io:format("Encountered unexpected event while running as ~p: ~p~n",
               [StateName, Msg]).
 
-follower({vote, From, #request_vote{term=Term, candidate_id=CandidateId}},
-         #state{node_id = Node, term=CurrentTerm, voted_for=VotedFor} = State) ->
-    VoteAtTerm = array:get(Term, VotedFor),
-    if
-        (Term < CurrentTerm) ->
-            {next_state, follower, State};
-        (VoteAtTerm == undefined) ->
-            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
-            gen_fsm:send_event({node, From}, {vote_response, true, CurrentTerm}),
-            {next_state, follower, State#state{voted_for=array:set(Term, CandidateId, VotedFor)}};
-        true ->
-            gen_fsm:send_event({node, From}, {vote_response, false, CurrentTerm}),
-            {next_state, follower, State}
-    end;
-
 %% During timeout, start an election.
 follower(timeout, #state{} = State) ->
+    start_election(State);
+
+follower({timeout, _Ref, dusty}, State) ->
     start_election(State);
 
 %% followers are completely passive.
 follower(Msg, #state{term=Term, node_id=NodeId, timeout=Timeout} = State) ->
     case Msg of
-        #append_entry{leader_id = From} = AppendEntry ->
+        #append_entry{leader_id=From} = AppendEntry ->
             {Successful, NewState} = node_state:follower_next_state(State, AppendEntry),
             gen_fsm:send_event({node, From},
                                #append_response{success=Successful, node_id=NodeId, term=Term}),
@@ -91,21 +72,6 @@ leader(Msg, State) ->
 candidate(timeout, State) ->
     start_election(State);
 
-candidate({vote, From, #request_vote{term=Term, candidate_id=CandidateId}},
-         #state{node_id = Node, term=CurrentTerm, voted_for=VotedFor} = State) ->
-    VoteAtTerm = array:get(Term, VotedFor),
-    if
-        (Term < CurrentTerm) ->
-            {next_state, candidate, State};
-        (VoteAtTerm == undefined) ->
-            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
-            gen_fsm:send_event({node, From}, {vote_response, true, CurrentTerm}),
-            {next_state, follower, State#state{voted_for=array:set(Term, CandidateId, VotedFor)}};
-        true ->
-            gen_fsm:send_event({node, From}, {vote_response, false, CurrentTerm}),
-            {next_state, candidate, State}
-    end;
-
 candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
                       addresses=Addresses, timeout=Timeout, term=Term} = State) ->
     case Msg of
@@ -119,7 +85,7 @@ candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
                                   leader_id = Node,
                                   indexes = leader_index:new(Addresses, LastLogIndex)},
                     heartbeat(State),
-                    {next_state, leader, NextState};
+                    {next_state, leader, NextState, Timeout};
                 true ->
                     {next_state, candidate, State#state{votes = Votes + 1}, Timeout}
             end;
@@ -149,11 +115,19 @@ start_election(#state{term=CurrentTerm, node_id=Node, voted_for=VotedFor, timeou
      State#state{term=CurrentTerm + 1, votes=1,
                  voted_for=array:set(CurrentTerm + 1, Node, VotedFor)}, Timeout}.
 
+vote(#state{term=Term, node_id=Node, log=Log, addresses=Addresses}) ->
+    LastLogIndex = array:size(Log)-1,
+    LastLogTerm  = (array:get(LastLogIndex, Log))#entry.term,
+    Vote = #request_vote{term=Term, candidate_id=Node,
+                         last_log_index=LastLogIndex,
+                         last_log_term=LastLogTerm},
+    broadcast_all_state(Node, Addresses, Vote).
+
 %% Handles client call
-leader(Event, From, #state{machine=Machine} = StateData) ->
+leader(Event, From, #state{machine=Machine, timeout=Timeout} = StateData) ->
     {Result, NewMachine} = machine:apply(Event, Machine),
     _Reply = gen_fsm:reply(From, Result),
-    {next_state, leader, StateData#state{machine = NewMachine}}.
+    {next_state, leader, StateData#state{machine = NewMachine}, Timeout}.
 
 %% Only leader handles sync events
 %% followers and candidates just ignore message
@@ -177,7 +151,20 @@ handle_info(_I, StateName, State) ->
 %% Useful debugging step for now. Checks the state of a node.
 handle_event(status, StateName, #state{node_id=Node, timeout=Timeout} = StateData) ->
     io:format("node: ~p is running as ~p~n", [Node, StateName]),
-    {next_state, StateName, StateData, Timeout}.
+    {next_state, StateName, StateData, Timeout};
+
+%% Handle RequestVote
+handle_event(#request_vote{candidate_id=CandidateId} = RequestVote, StateName,
+             #state{term=CurrentTerm} = State) when is_record(RequestVote, request_vote) ->
+    {VoteGranted, NewState} = node_state:next_state(RequestVote, State),
+    case VoteGranted of
+        true ->
+            gen_fsm:send_event({node, CandidateId}, {vote_response, true, CurrentTerm}),
+            {next_state, follower, NewState};
+        false ->
+            gen_fsm:send_event({node, CandidateId}, {vote_response, false, CurrentTerm}),
+            {next_state, StateName, NewState}
+    end.
 
 %% Points to current leader
 handle_sync_event(leader, From, StateName, StateData) ->
@@ -193,3 +180,7 @@ code_change(_OldVsn, State, LoopData, _Extra) ->
 broadcast(Node, Addresses, Msg) ->
     OtherNodes = [A || A <- Addresses, A /= Node],
     lists:foreach(fun(N) -> gen_fsm:send_event({node, N}, Msg) end, OtherNodes).
+
+broadcast_all_state(Node, Addresses, Msg) ->
+    OtherNodes = [A || A <- Addresses, A /= Node],
+    lists:foreach(fun(N) -> gen_fsm:send_all_state_event({node, N}, Msg) end, OtherNodes).
