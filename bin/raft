@@ -13,8 +13,10 @@ class Cli < Thor
     run_erl_cmd('-name client -eval "application:load(raft)."')
   end
 
-  def run_erl_cmd(flags='')
-    system "erl -pa ebin -config conf/raft.config #{flags}"
+  no_commands do
+    def run_erl_cmd(flags='')
+      system "erl -pa ebin -config conf/raft.config #{flags}"
+    end
   end
 end
 
