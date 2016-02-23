@@ -1,5 +1,4 @@
--module(leader_index_test).
--include("raft_interface.hrl").
+-module(leader_index_tests).
 -include_lib("eunit/include/eunit.hrl").
 
 %% TODO(bryant): Use quickcheck instead of this fixture

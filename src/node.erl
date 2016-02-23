@@ -1,25 +1,15 @@
 -module(node).
+
+-behaviour(gen_fsm).
+-include("raft_interface.hrl").
+
 -export([init/1, start_link/2, handle_info/3, handle_event/3, handle_sync_event/4, terminate/2, stop/0]).
 -export([code_change/4, terminate/3]).
 -export([follower/2, follower/3, leader/2, leader/3, candidate/2, candidate/3]).
 
--behaviour(gen_fsm).
--include("raft_interface.hrl").
--export([start_election/1, vote/1]).
--export([follower_next_state/2]).
 
 start_link(Node, Addresses) ->
-    EmptyLog = array:new({fixed, false}),
-
-    %% TODO(bryant): Log must be persisted on disk.
-    State = #state{log=array:set(0, #entry{term=0, command=initialize}, EmptyLog),
-                   node_id=Node, addresses=Addresses, timeout=timeout_value(10000)},
-    gen_fsm:start_link({local, ?MODULE}, ?MODULE, State, []).
-
-%% Random value between [T, 2T].
-%% This allows progress eventually be made during leader elections.
-timeout_value(T) ->
-    T + random:uniform(T).
+    gen_fsm:start_link({local, ?MODULE}, ?MODULE, node_state:new(Node, Addresses), []).
 
 init(#state{timeout=Timeout} = State) ->
     {ok, follower, State, Timeout}.
@@ -71,47 +61,28 @@ follower(timeout, #state{} = State) ->
     start_election(State);
 
 %% followers are completely passive.
-follower(Msg, #state{term=Term, timeout=Timeout} = State) ->
+follower(Msg, #state{term=Term, node_id=NodeId, timeout=Timeout} = State) ->
     case Msg of
-        candidate ->
-            io:format("~p~n", ["Follower -> Candidate"]),
-            {next_state, candidate, State, Timeout};
         #append_entry{leader_id = From} = AppendEntry ->
-            {Successful, NewState} = follower_next_state(State, AppendEntry),
-            gen_fsm:send_event({node, From}, {Successful, Term}),
+            {Successful, NewState} = node_state:follower_next_state(State, AppendEntry),
+            gen_fsm:send_event({node, From},
+                               #append_response{success=Successful, node_id=NodeId, term=Term}),
             {next_state, follower, NewState, Timeout};
         _Msg ->
             log_unknown(Msg, follower),
             {next_state, follower, State, Timeout}
     end.
 
-%% Returns {success, NewState}
-%% success will be true if follower contained entry matching prev_log_index, prev_log_term
-%% TODO(bryant): Need to delete all entries after the last successful one.
-follower_next_state(#state{log=Log} = State,
-                    #append_entry{leader_id=LeaderId, command=Command,
-                                  prev_term=PrevTerm, prev_index=PrevIndex,
-                                  cur_term=CurTerm, cur_index=CurIndex}) ->
-    case (array:size(Log) > PrevIndex) andalso
-        ((array:get(PrevIndex, Log))#entry.term == PrevTerm) of
-        true ->
-            NewEntry = #entry{term=CurTerm,
-                              command=Command},
-            {true, State#state{log=array:set(CurIndex, NewEntry, Log),
-                               leader_id = LeaderId}};
-        false -> {false, State}
-    end.
-
 %% Timeout exhausted during leader state
-leader({timeout, _Ref, _Msg}, #state{node_id=Node} = State) ->
-    io:format("Node: ~p broadcasting another heartbeat~n", [Node]),
+leader({timeout, _Ref, _Msg}, State) ->
     heartbeat(State),
     {next_state, leader, State};
 
 leader(Msg, State) ->
     case Msg of
-        {_Success, _Term} ->
-            {next_state, leader, State};
+        #append_response{} = AppendResponse ->
+            {next_state, leader,
+             node_state:leader_next_state(leader, State, AppendResponse)};
         _Msg ->
             log_unknown(Msg, leader),
             {next_state, leader, State}
@@ -122,10 +93,9 @@ candidate(timeout, State) ->
     start_election(State);
 
 candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
-                      addresses=Addresses, timeout=Timeout} = State) ->
+                      addresses=Addresses, timeout=Timeout, term=Term} = State) ->
     case Msg of
         {vote_response, true, _Term} ->
-            io:format("~p Accepted Vote from server~n", [Node]),
             if
                 Votes > 1 ->
                     %% This is now the leader now
@@ -137,16 +107,21 @@ candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
                     heartbeat(State),
                     {next_state, leader, NextState};
                 true ->
-                    {next_state, candidate,
-                     State#state{votes = Votes + 1},
-                     Timeout}
+                    {next_state, candidate, State#state{votes = Votes + 1}, Timeout}
             end;
         {vote_response, false, _Term} ->
             io:format("Vote was rejected~n"),
             {next_state, candidate, State, Timeout};
-        #append_entry{} ->
-            io:format("Received AppendEntry from a valid leader.~n Stepping down.~n"),
-            {next_state, follower, State, Timeout};
+        #append_entry{cur_term=CurTerm, leader_id=From} ->
+            if
+                CurTerm < Term ->
+                    gen_fsm:send_event({node, From},
+                                       #append_response{success=false, node_id=Node}),
+                    {next_state, candidate, State, Timeout};
+                true ->
+                    io:format("Stepping down.~n"),
+                    {next_state, follower, State, Timeout}
+            end;
         _Msg ->
             log_unknown(Msg, candidate),
             {next_state, candidate, State, Timeout}

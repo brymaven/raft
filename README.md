@@ -11,6 +11,10 @@ $ bundle install
 ````
 
 ## Quickstart
+* Compile
+````bash
+$ ./rebar compile
+````
 * Update the ``conf/raft.config`` to use your hostname. Note that this should be fully qualified.
 ````erlang
   'node0@your-host'

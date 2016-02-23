@@ -1,4 +1,4 @@
--module(machine_test).
+-module(machine_tests).
 -include_lib("eunit/include/eunit.hrl").
 
 machine_fixture() ->

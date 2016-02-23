@@ -11,4 +11,5 @@
                        entries,
                        leader_id,
                        leader_commit}).
+-record(append_response, {node_id, term, success}).
 -record(request_vote, {term, candidate_id, last_log_index, last_log_term}).
