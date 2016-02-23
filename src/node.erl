@@ -81,8 +81,7 @@ leader({timeout, _Ref, _Msg}, State) ->
 leader(Msg, State) ->
     case Msg of
         #append_response{} = AppendResponse ->
-            {next_state, leader,
-             node_state:leader_next_state(leader, State, AppendResponse)};
+            {next_state, leader, node_state:leader_next_state(State, AppendResponse)};
         _Msg ->
             log_unknown(Msg, leader),
             {next_state, leader, State}
@@ -91,6 +90,21 @@ leader(Msg, State) ->
 %% Timeout, so it assumes that there's been a split vote
 candidate(timeout, State) ->
     start_election(State);
+
+candidate({vote, From, #request_vote{term=Term, candidate_id=CandidateId}},
+         #state{node_id = Node, term=CurrentTerm, voted_for=VotedFor} = State) ->
+    VoteAtTerm = array:get(Term, VotedFor),
+    if
+        (Term < CurrentTerm) ->
+            {next_state, candidate, State};
+        (VoteAtTerm == undefined) ->
+            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
+            gen_fsm:send_event({node, From}, {vote_response, true, CurrentTerm}),
+            {next_state, follower, State#state{voted_for=array:set(Term, CandidateId, VotedFor)}};
+        true ->
+            gen_fsm:send_event({node, From}, {vote_response, false, CurrentTerm}),
+            {next_state, candidate, State}
+    end;
 
 candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
                       addresses=Addresses, timeout=Timeout, term=Term} = State) ->
@@ -128,11 +142,12 @@ candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
     end.
 
 %% Each server will vote only once. Need to persist to disk (TODO)
-start_election(#state{term=CurrentTerm, node_id=Node, timeout=Timeout} = State) ->
+start_election(#state{term=CurrentTerm, node_id=Node, voted_for=VotedFor, timeout=Timeout} = State) ->
     io:format("Node ~p just timed out. Starting election~n", [Node]),
     vote(State),
     {next_state, candidate,
-     State#state{term=CurrentTerm + 1, votes=1, voted_for=Node}, Timeout}.
+     State#state{term=CurrentTerm + 1, votes=1,
+                 voted_for=array:set(CurrentTerm + 1, Node, VotedFor)}, Timeout}.
 
 %% Handles client call
 leader(Event, From, #state{machine=Machine} = StateData) ->

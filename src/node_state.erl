@@ -12,7 +12,7 @@ new(Node, Addresses) ->
 
     %% TODO(bryant): Log must be persisted on disk.
     #state{log=array:set(0, #entry{term=0, command=initialize}, EmptyLog),
-           node_id=Node, addresses=Addresses, timeout=timeout_value(10000)}.
+           node_id=Node, addresses=Addresses, timeout=timeout_value(5000)}.
 
 %% Random value between [T, 2T].
 %% This allows progress eventually be made during leader elections.
