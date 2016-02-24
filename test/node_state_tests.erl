@@ -58,11 +58,55 @@ follower_keeps_commit_index() ->
                                     leader_commit=1}),
     ?assertEqual(3, State#state.commit_index).
 
-next_state_leader_test() ->
-    LeaderIndexes = leader_index:new([a, b, c], 2),
-    NewState = node_state:leader_next_state(#state{indexes=LeaderIndexes},
-                                            #append_response{node_id=a, success=true}),
-    ?assertEqual({ok, {1, 4}}, dict:find(a, NewState#state.indexes)).
+next_state_leader_test_() ->
+    [all_commit_conditions(),
+     non_majority_match_commit_conditions(),
+     different_log_term_commit_conditions(),
+     lower_index_commit_conditions()].
+
+all_commit_conditions() ->
+    LeaderIndexes = leader_index:new([a, b, c], 0),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    NewState = node_state:leader_next_state(
+                 #state{indexes=LeaderIndexes2,
+                        addresses=[a,b,c],
+                        term=1,
+                        log=array:from_list([#entry{term=1}, #entry{term=1}])},
+                 #append_response{node_id=a, success=true}),
+    ?_assertEqual(1, NewState#state.commit_index).
+
+non_majority_match_commit_conditions() ->
+    LeaderIndexes = leader_index:new([a, b, c], 0),
+    NewState = node_state:leader_next_state(
+                 #state{indexes=LeaderIndexes,
+                        addresses=[a,b,c],
+                        term=1,
+                        log=array:from_list([#entry{term=1}, #entry{term=1}])},
+                 #append_response{node_id=a, success=true}),
+    ?_assertEqual(0, NewState#state.commit_index).
+
+different_log_term_commit_conditions() ->
+    LeaderIndexes = leader_index:new([a, b, c], 0),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    NewState = node_state:leader_next_state(
+                 #state{indexes=LeaderIndexes2,
+                        addresses=[a,b,c],
+                        term=2,
+                        log=array:from_list([#entry{term=1}, #entry{term=1}])},
+                 #append_response{node_id=a, success=true}),
+    ?_assertEqual(0, NewState#state.commit_index).
+
+lower_index_commit_conditions() ->
+    LeaderIndexes = leader_index:new([a, b, c], 0),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    NewState = node_state:leader_next_state(
+                 #state{indexes=LeaderIndexes2,
+                        addresses=[a,b,c],
+                        term=1,
+                        commit_index=3,
+                        log=array:from_list([#entry{term=1}, #entry{term=1}])},
+                 #append_response{node_id=a, success=true}),
+    ?_assertEqual(3, NewState#state.commit_index).
 
 next_state_test_() ->
     [terms_equal_candidate_larger_log(),
@@ -74,23 +118,23 @@ terms_equal_candidate_larger_log() ->
     RequestVote = #request_vote{term=2, last_log_index=2, last_log_term=2},
     Log = array:from_list([#entry{term=2}]),
 
-    ?_assertMatch({true, _State}, node_state:next_state(RequestVote, #state{log=Log})).
+    ?_assertMatch({#vote_response{vote_granted=true}, _State}, node_state:next_state(RequestVote, #state{log=Log})).
 
 terms_equal_candidate_smaller_log() ->
     RequestVote = #request_vote{term=2, last_log_index=2, last_log_term=2},
     Log = array:from_list([#entry{term=2}, #entry{term=2},
                            #entry{term=2}, #entry{term=2}]),
 
-    ?_assertMatch({false, _State}, node_state:next_state(RequestVote, #state{log=Log})).
+    ?_assertMatch({#vote_response{vote_granted=false}, _State}, node_state:next_state(RequestVote, #state{log=Log})).
 
 terms_equal_candidate_equal_log_index() ->
     RequestVote = #request_vote{term=2, last_log_index=2, last_log_term=2},
     Log = array:from_list([#entry{term=2}, #entry{term=2}, #entry{term=2}]),
 
-    ?_assertMatch({true, _State}, node_state:next_state(RequestVote, #state{log=Log})).
+    ?_assertMatch({#vote_response{vote_granted=true}, _State}, node_state:next_state(RequestVote, #state{log=Log})).
 
 candidate_term_smaller() ->
     RequestVote = #request_vote{term=2, last_log_index=5, last_log_term=1},
     Log = array:from_list([#entry{term=2}, #entry{term=2}, #entry{term=2}]),
 
-    ?_assertMatch({false, _State}, node_state:next_state(RequestVote, #state{log=Log})).
+    ?_assertMatch({#vote_response{vote_granted=false}, _State}, node_state:next_state(RequestVote, #state{log=Log})).
