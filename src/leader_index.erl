@@ -28,15 +28,15 @@ update(Node, Success,
                 {MatchIndices,
                  dict:store(Node, NextIndex - 1, NextIndices)}
     end,
-    %% CommitIndex = case array:get(NextIndex, MatchIndices) > N/2 of
-    %%                   true -> max(C
     LeaderIndex#leader_index{next_index=NewNextIndices, match_index=NewMatchIndices}.
 
+%% Safe operation
 -spec(next(atom(), #leader_index{}) -> integer()).
 next(Node, #leader_index{next_index=NextIndices}) ->
     {ok, Index} = dict:find(Node, NextIndices),
     Index.
 
+%% Safe operation
 match(I, #leader_index{match_index=MatchIndices}) ->
     array:get(I, MatchIndices).
 

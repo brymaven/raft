@@ -5,7 +5,7 @@
 -module(node_state).
 
 -include("raft_interface.hrl").
--export([new/2, follower_next_state/2, leader_next_state/2, next_state/2]).
+-export([new/2, follower_next_state/2, leader_next_state/2, next_state/2, leader_append_entry/2]).
 
 new(Node, Addresses) ->
     EmptyLog = array:new({fixed, false}),
@@ -53,15 +53,40 @@ leader_next_state(#state{term=Term, indexes=LeaderIndex,
     L = length(Addresses),
     NewLeaderIndex = leader_index:update(NodeId, Success, LeaderIndex),
     Index = leader_index:next(NodeId, NewLeaderIndex) - 1,
+    io:format("Was it successful ~p and the index~p ~n", [Success, Index]),
 
-    NewCommitIndex = case (leader_index:match(Index, NewLeaderIndex) > L/2)
-                         and ((array:get(Index, Log))#entry.term == Term)
-                         and (Index > CommitIndex) of
+    NewCommitIndex = case Success
+                         andalso (leader_index:match(Index, NewLeaderIndex) > L/2)
+                         andalso ((array:get(Index, Log))#entry.term == Term)
+                         andalso (Index > CommitIndex) of
                          true  -> Index;
                          false -> CommitIndex
                      end,
-    State#state{indexes=leader_index:update(NodeId, Success, LeaderIndex),
+    State#state{indexes=NewLeaderIndex,
                 commit_index=NewCommitIndex}.
+
+%% Create the append entry message for the next node
+-spec(leader_append_entry(atom(), #state{}) -> #append_entry{}).
+leader_append_entry(Node,
+                    #state{term=Term, log=Log, indexes=LeaderIndices}) ->
+    %% This is the lastest in the log
+    %% Next index could never exceed LastLogIndex. It could only pos
+    LastLogIndex = array:size(Log) - 1,
+    NextIndex = leader_index:next(Node, LeaderIndices),
+    PrevEntry = array:get(NextIndex - 1, Log),
+    io:format("Last Log Index ~p~n", [LastLogIndex]),
+
+    #append_entry{
+       leader_id=Node,
+       cur_term=Term, cur_index=NextIndex,
+       prev_term=PrevEntry#entry.term,
+       prev_index=NextIndex - 1,
+       command=case (NextIndex > LastLogIndex) of
+                   true ->
+                       empty;
+                   false ->
+                       (array:get(NextIndex, Log))#entry.command
+               end}.
 
 -spec(next_state(#request_vote{}, #state{}) -> {#vote_response{}, #state{}}).
 next_state(#request_vote{
@@ -69,12 +94,13 @@ next_state(#request_vote{
               last_log_index=CandidateLogIndex, last_log_term=CandidateLogTerm},
            #state{node_id=Node, log=Log, term=CurrentTerm, voted_for=VotedFor} = State) ->
     VoteAtTerm = array:get(Term, VotedFor),
+    %%io:format("Voted for ~p. VotedFor Array ~p~n", [VoteAtTerm, VotedFor]),
     {LastLogIndex, #entry{term=LastLogTerm}} = last_valid(Log),
     if
         Term < CurrentTerm ->
             {#vote_response{term=CurrentTerm, vote_granted=false}, State};
         VoteAtTerm == undefined, CandidateLogTerm > LastLogTerm; (CandidateLogTerm == LastLogTerm) and (CandidateLogIndex >= LastLogIndex) ->
-            io:format("Node: ~p voted for server at term ~p~n", [Node, Term]),
+            io:format("Node: ~p voted for server ~p at term ~p~n", [Node, CandidateId, Term]),
             {#vote_response{term=CurrentTerm, vote_granted=true},
              State#state{
                voted_for=array:set(Term, CandidateId, VotedFor),
