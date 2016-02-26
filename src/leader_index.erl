@@ -3,7 +3,7 @@
 %%%---------------------------------------------------------------------
 
 -module(leader_index).
--export([new/2, match/2, update/3, next/2]).
+-export([new/2, match/2, update/4, next/2]).
 -record(leader_index, {next_index, match_index, n}).
 
 -spec(new(list(), integer()) -> dict:dict()).
@@ -14,16 +14,20 @@ new(Addresses, LastLogIndex) ->
     MatchIndex = array:new([{fixed, false}, {default, 0}]),
     #leader_index{next_index=NextIndex, match_index=MatchIndex, n=length(Addresses)}.
 
--spec(update(atom(), boolean(), #leader_index{}) -> #leader_index{}).
+-spec(update(atom(), boolean(), #leader_index{}, integer()) -> #leader_index{}).
 update(Node, Success,
-       #leader_index{next_index=NextIndices, match_index=MatchIndices} = LeaderIndex) ->
+       #leader_index{next_index=NextIndices, match_index=MatchIndices} = LeaderIndex,
+       LastLogIndex) ->
     NextIndex = next(Node, LeaderIndex),
 
     {NewMatchIndices, NewNextIndices} =
         case Success of
             true ->
                 {increment(NextIndex, MatchIndices),
-                 dict:store(Node, NextIndex + 1, NextIndices)};
+                 if
+                     NextIndex > LastLogIndex -> NextIndices;
+                     true -> dict:store(Node, NextIndex + 1, NextIndices)
+                 end};
             false ->
                 {MatchIndices,
                  dict:store(Node, NextIndex - 1, NextIndices)}

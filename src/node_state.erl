@@ -5,7 +5,7 @@
 -module(node_state).
 
 -include("raft_interface.hrl").
--export([new/2, follower_next_state/2, leader_next_state/2, next_state/2, leader_append_entry/2]).
+-export([new/2, follower_next_state/2, leader_next_state/2, next_state/2, leader_append_entry/2, timeout_value/1]).
 
 new(Node, Addresses) ->
     EmptyLog = array:new({fixed, false}),
@@ -18,6 +18,7 @@ new(Node, Addresses) ->
 %% Random value between [T, 2T].
 %% This allows progress eventually be made during leader elections.
 timeout_value(T) ->
+    random:seed(now()),
     T + random:uniform(T).
 
 follower_next_state(#state{log=Log, commit_index=CommitIndex} = State,
@@ -51,7 +52,11 @@ leader_next_state(#state{term=Term, indexes=LeaderIndex,
                          commit_index=CommitIndex} = State,
                   #append_response{success=Success, node_id=NodeId}) ->
     L = length(Addresses),
-    NewLeaderIndex = leader_index:update(NodeId, Success, LeaderIndex),
+    {LastLogIndex, _} = last_valid(Log),
+    %% TODO(bryant): This obviously can be improved.
+    %%               Once message gets to far, there's a success, but still shouldn't
+    %%               increment next_index
+    NewLeaderIndex = leader_index:update(NodeId, Success, LeaderIndex, LastLogIndex),
     Index = leader_index:next(NodeId, NewLeaderIndex) - 1,
     io:format("Was it successful ~p and the index~p ~n", [Success, Index]),
 
@@ -68,16 +73,15 @@ leader_next_state(#state{term=Term, indexes=LeaderIndex,
 %% Create the append entry message for the next node
 -spec(leader_append_entry(atom(), #state{}) -> #append_entry{}).
 leader_append_entry(Node,
-                    #state{term=Term, log=Log, indexes=LeaderIndices}) ->
+                    #state{term=Term, node_id=LeaderId, log=Log, indexes=LeaderIndices}) ->
     %% This is the lastest in the log
     %% Next index could never exceed LastLogIndex. It could only pos
     LastLogIndex = array:size(Log) - 1,
     NextIndex = leader_index:next(Node, LeaderIndices),
     PrevEntry = array:get(NextIndex - 1, Log),
-    io:format("Last Log Index ~p~n", [LastLogIndex]),
 
     #append_entry{
-       leader_id=Node,
+       leader_id=LeaderId,
        cur_term=Term, cur_index=NextIndex,
        prev_term=PrevEntry#entry.term,
        prev_index=NextIndex - 1,
@@ -94,7 +98,7 @@ next_state(#request_vote{
               last_log_index=CandidateLogIndex, last_log_term=CandidateLogTerm},
            #state{node_id=Node, log=Log, term=CurrentTerm, voted_for=VotedFor} = State) ->
     VoteAtTerm = array:get(Term, VotedFor),
-    %%io:format("Voted for ~p. VotedFor Array ~p~n", [VoteAtTerm, VotedFor]),
+    io:format("Voted for ~p. VotedFor Array ~p~n", [VoteAtTerm, VotedFor]),
     {LastLogIndex, #entry{term=LastLogTerm}} = last_valid(Log),
     if
         Term < CurrentTerm ->

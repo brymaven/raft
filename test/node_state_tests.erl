@@ -78,7 +78,7 @@ initial_log() ->
 
 all_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
-    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes, 5),
     NewState = node_state:leader_next_state(
                  #state{indexes=LeaderIndexes2,
                         addresses=[a,b,c],
@@ -99,7 +99,7 @@ non_majority_match_commit_conditions() ->
 
 different_log_term_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
-    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes, 5),
     NewState = node_state:leader_next_state(
                  #state{indexes=LeaderIndexes2,
                         addresses=[a,b,c],
@@ -110,7 +110,7 @@ different_log_term_commit_conditions() ->
 
 lower_index_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
-    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes),
+    LeaderIndexes2 = leader_index:update(b, true, LeaderIndexes, 5),
     NewState = node_state:leader_next_state(
                  #state{indexes=LeaderIndexes2,
                         addresses=[a,b,c],
@@ -193,16 +193,15 @@ append_entry_second_entry() ->
     Addresses = [a,b,c],
     LeaderIndices = leader_index:update(
                       a, true,
-                      leader_index:new(Addresses, 0)),
+                      leader_index:new(Addresses, 0), 5),
     State = (node_state:new(b, Addresses))
         #state{indexes=LeaderIndices,
                term=4,
                log=Log},
     AppendEntry = node_state:leader_append_entry(a, State),
-    ?_assertMatch(#append_entry{prev_term=1,
-                                prev_index=1,
-                                cur_term=4,
-                                cur_index=2,
+    ?_assertMatch(#append_entry{leader_id=b,
+                                prev_term=1, prev_index=1,
+                                cur_term=4,  cur_index=2,
                                 command={put,3,b}}, AppendEntry).
 
 append_entry_out_of_bound() ->
@@ -213,15 +212,13 @@ append_entry_out_of_bound() ->
     Addresses = [a,b,c],
     LeaderIndices = leader_index:update(
                       a, true,
-                      leader_index:new(Addresses, 0)),
+                      leader_index:new(Addresses, 0), 5),
     State = (node_state:new(b, Addresses))
         #state{indexes=LeaderIndices,
                term=4,
                log=Log},
     AppendEntry = node_state:leader_append_entry(a, State),
-    io:format("AppendEntry Entry command ~p~n", [AppendEntry#append_entry.command]),
-    ?_assertMatch(#append_entry{prev_term=1,
-                                prev_index=1,
-                                cur_term=4,
-                                cur_index=2,
+    ?_assertMatch(#append_entry{leader_id=b,
+                                prev_term=1, prev_index=1,
+                                cur_term=4,  cur_index=2,
                                 command=empty}, AppendEntry).

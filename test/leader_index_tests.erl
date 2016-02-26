@@ -13,16 +13,23 @@ new_indexes_test() ->
 
 update_indexes_test_() ->
     [fun success_increments_index/0,
-     fun success_decrements_index/0].
+     fun success_decrements_index/0,
+     fun success_does_not_increment_at_end/0].
 
 success_increments_index() ->
     Indexes = indexes(),
-    Indexes2 = leader_index:update(a, true, Indexes),
+    Indexes2 = leader_index:update(a, true, Indexes, 4),
     ?assertEqual(4, leader_index:next(a, Indexes2)),
+    ?assertEqual(1, leader_index:match(3, Indexes2)).
+
+success_does_not_increment_at_end() ->
+    Indexes = indexes(),
+    Indexes2 = leader_index:update(a, true, Indexes, 2),
+    ?assertEqual(3, leader_index:next(a, Indexes2)),
     ?assertEqual(1, leader_index:match(3, Indexes2)).
 
 success_decrements_index() ->
     Indexes = indexes(),
-    Indexes2 = leader_index:update(a, false, Indexes),
+    Indexes2 = leader_index:update(a, false, Indexes, 4),
     ?assertEqual(2, leader_index:next(a, Indexes2)),
     ?assertEqual(0, leader_index:match(3, Indexes2)).
