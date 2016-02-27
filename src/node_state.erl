@@ -41,8 +41,16 @@ follower_next_state(#state{log=Log, commit_index=CommitIndex} = State,
                                  true ->
                                      CommitIndex
                              end,
-            {true, State#state{log=array:set(CurIndex, NewEntry, ClearedLog),
-                               leader_id=LeaderId, commit_index=NewCommitIndex}};
+            NewLog = case Command of
+                         empty -> Log;
+                         _     -> array:set(CurIndex, NewEntry, ClearedLog)
+                     end,
+            {NewLastApplied, NewMachine} =
+                apply_command(State, (array:get(NewCommitIndex, NewLog))#entry.command,
+                              NewCommitIndex),
+            {true, State#state{log=NewLog, leader_id=LeaderId,
+                               commit_index=NewCommitIndex,
+                               machine=NewMachine, last_applied=NewLastApplied}};
         false -> {false, State}
     end.
 
@@ -58,7 +66,6 @@ leader_next_state(#state{term=Term, indexes=LeaderIndex,
     %%               increment next_index
     NewLeaderIndex = leader_index:update(NodeId, Success, LeaderIndex, LastLogIndex),
     Index = leader_index:next(NodeId, NewLeaderIndex) - 1,
-    io:format("Was it successful ~p and the index~p ~n", [Success, Index]),
 
     NewCommitIndex = case Success
                          andalso (leader_index:match(Index, NewLeaderIndex) > L/2)
@@ -67,8 +74,22 @@ leader_next_state(#state{term=Term, indexes=LeaderIndex,
                          true  -> Index;
                          false -> CommitIndex
                      end,
+    {NewLastApplied, NewMachine} = apply_command(State, (array:get(Index, Log))#entry.command, NewCommitIndex),
+
     State#state{indexes=NewLeaderIndex,
-                commit_index=NewCommitIndex}.
+                commit_index=NewCommitIndex,
+                last_applied=NewLastApplied,
+                machine=NewMachine}.
+
+apply_command(#state{last_applied=LastApplied, machine=Machine},
+              Command, NewCommitIndex) ->
+    if
+        NewCommitIndex > LastApplied ->
+            {_, NewMachine} = machine:apply(Command, Machine),
+            {NewCommitIndex, NewMachine};
+        true ->
+            {LastApplied, Machine}
+    end.
 
 %% Create the append entry message for the next node
 -spec(leader_append_entry(atom(), #state{}) -> #append_entry{}).
@@ -98,7 +119,7 @@ next_state(#request_vote{
               last_log_index=CandidateLogIndex, last_log_term=CandidateLogTerm},
            #state{node_id=Node, log=Log, term=CurrentTerm, voted_for=VotedFor} = State) ->
     VoteAtTerm = array:get(Term, VotedFor),
-    io:format("Voted for ~p. VotedFor Array ~p~n", [VoteAtTerm, VotedFor]),
+    io:format("Voted for ~p at term ~p~n", [VoteAtTerm, Term]),
     {LastLogIndex, #entry{term=LastLogTerm}} = last_valid(Log),
     if
         Term < CurrentTerm ->

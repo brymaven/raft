@@ -56,7 +56,8 @@ follower_keeps_commit_index() ->
                       #append_entry{cur_index=2, cur_term=4,
                                     prev_term=1, prev_index=0,
                                     leader_commit=1}),
-    ?assertEqual(3, State#state.commit_index).
+    [?assertEqual(1, State#state.last_applied),
+     ?assertEqual(3, State#state.commit_index)].
 
 next_state_leader_test_() ->
     [initial_log(),
@@ -74,7 +75,8 @@ initial_log() ->
                         term=1,
                         log=array:from_list([#entry{term=1}])},
                  #append_response{node_id=a, success=true}),
-    ?_assertEqual(0, NewState#state.commit_index).
+    [?_assertEqual(0, NewState#state.last_applied),
+     ?_assertEqual(0, NewState#state.commit_index)].
 
 all_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
@@ -85,7 +87,8 @@ all_commit_conditions() ->
                         term=1,
                         log=array:from_list([#entry{term=1}, #entry{term=1}])},
                  #append_response{node_id=a, success=true}),
-    ?_assertEqual(1, NewState#state.commit_index).
+    [?_assertEqual(1, NewState#state.last_applied),
+     ?_assertEqual(1, NewState#state.commit_index)].
 
 non_majority_match_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
@@ -106,7 +109,8 @@ different_log_term_commit_conditions() ->
                         term=2,
                         log=array:from_list([#entry{term=1}, #entry{term=1}])},
                  #append_response{node_id=a, success=true}),
-    ?_assertEqual(0, NewState#state.commit_index).
+    [?_assertEqual(0, NewState#state.last_applied),
+     ?_assertEqual(0, NewState#state.commit_index)].
 
 lower_index_commit_conditions() ->
     LeaderIndexes = leader_index:new([a, b, c], 0),
