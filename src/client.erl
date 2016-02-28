@@ -3,7 +3,10 @@
 %%%---------------------------------------------------------------------
 
 -module(client).
+-include("raft_interface.hrl").
 -export([get/1, delete/1, put/2, leader/0]).
+%% TODO(bryant): Useful for debugging. Remove later
+-export([status/1]).
 
 %% TODO(bryant): Just looks at first node right now. Just need to do this once
 %% and then pass along the leader
@@ -30,7 +33,15 @@ put(Key, Value) ->
 execute(Msg) ->
     case leader() of
         {ok, Leader} ->
-            gen_fsm:sync_send_event({node, Leader}, Msg, 5000);
+            gen_fsm:send_event({node, Leader}, #client_call{from=node(), command=Msg}),
+            receive
+                {ok, Msg} -> Msg;
+                _ -> error
+            after 5000 -> timed_out
+            end;
         Error ->
             Error
     end.
+
+status(Node) ->
+    gen_fsm:send_all_state_event({node, Node}, status).

@@ -65,10 +65,27 @@ leader({timeout, _Ref, _Msg}, State) ->
     heartbeat(State),
     {next_state, leader, State};
 
+%% Handles client calls
+leader(#client_call{from=From, command=Command}, #state{term=Term,log=Log} = State) ->
+    NextIndex = array:size(Log),
+    NextLog = array:set(NextIndex, #entry{term=Term, command=Command}, Log),
+
+    %% TODO(bryant): Need to get a synchronous response in time
+    %%               Difficult because all of these calls are async right now
+    %%               I would have to keep a reference to the client
+    {client, From} ! {ok, some_message_from_leader},
+
+    NextState = State#state{log=NextLog},
+    {next_state, leader, NextState};
+
+
 leader(Msg, State) ->
     case Msg of
-        #append_response{} = AppendResponse ->
+        AppendResponse when is_record(AppendResponse, append_response) ->
             {next_state, leader, node_state:leader_next_state(State, AppendResponse)};
+        VoteResponse when is_record(VoteResponse, vote_response) ->
+            io:format("Already achieved a majority, but here's another vote~n"),
+            {next_state, leader, State};
         _Msg ->
             log_unknown(Msg, leader),
             {next_state, leader, State}
@@ -100,7 +117,8 @@ candidate(Msg, #state{node_id=Node, votes=Votes, log=Log,
                                   indexes=leader_index:new(Addresses, LastLogIndex)},
                     gen_fsm:cancel_timer(TimerRef),
                     heartbeat(NextState),
-                    io:format("Node was just promoted to leader"),
+                    io:format("Node was just promoted to leader~n ~p nodes voted for ~n", [Votes]),
+                    io:format("Leader for term ~p~n", [Term]),
                     {next_state, leader, NextState};
                 true ->
                     {next_state, candidate, State#state{votes = Votes + 1}}
@@ -142,14 +160,11 @@ vote(#state{term=Term, node_id=Node, log=Log, addresses=Addresses}) ->
                          last_log_term=LastLogTerm},
     broadcast_all_state(Node, Addresses, Vote).
 
-%% Handles client call
-leader(Event, From, #state{machine=Machine} = StateData) ->
-    {Result, NewMachine} = machine:apply(Event, Machine),
-    _Reply = gen_fsm:reply(From, Result),
-    {next_state, leader, StateData#state{machine = NewMachine}}.
+%% Ignore sync events
+leader(Event, _From, State) ->
+    log_unknown(Event, leader),
+    {next_state, leader, State}.
 
-%% Only leader handles sync events
-%% followers and candidates just ignore message
 follower(Event, _From, State) ->
     log_unknown(Event, follower),
     {next_state, follower, State}.
@@ -168,9 +183,11 @@ handle_info(_I, StateName, State) ->
     {next_state, StateName, State}.
 
 %% Useful debugging step for now. Checks the state of a node.
-handle_event(status, StateName, #state{node_id=Node,log=Log} = StateData) ->
+handle_event(status,
+             StateName, #state{node_id=Node,log=Log,machine=Machine} = StateData) ->
     io:format("node: ~p is running as ~p~n", [Node, StateName]),
     io:format("node: ~p log: ~p~n", [Node, Log]),
+    io:format("Machine: ~p~n", [Machine]),
     {next_state, StateName, StateData};
 
 %% Handle RequestVote

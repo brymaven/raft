@@ -46,12 +46,21 @@ follower_next_state(#state{log=Log, commit_index=CommitIndex} = State,
                          _     -> array:set(CurIndex, NewEntry, ClearedLog)
                      end,
             {NewLastApplied, NewMachine} =
-                apply_command(State, (array:get(NewCommitIndex, NewLog))#entry.command,
+                apply_command(State,
+                              (get_or_else(NewCommitIndex, NewLog, #entry{}))#entry.command,
                               NewCommitIndex),
             {true, State#state{log=NewLog, leader_id=LeaderId,
                                commit_index=NewCommitIndex,
                                machine=NewMachine, last_applied=NewLastApplied}};
         false -> {false, State}
+    end.
+
+%% Returns entry or default
+get_or_else(Index, Log, Default) ->
+    case array:get(Index, Log) of
+        undefined ->
+            Default;
+        Element -> Element
     end.
 
 -spec(leader_next_state(#state{}, #append_response{}) -> #state{}).
